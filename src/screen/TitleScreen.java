@@ -15,10 +15,21 @@ public class TitleScreen extends Screen {
 
 	/** Milliseconds between changes in user selection. */
 	private static final int SELECTION_TIME = 200;
-	
+
 	/** Time between changes in user selection. */
 	private Cooldown selectionCooldown;
-
+	/** Menu item the cursor is on. */
+	private MenuItem selected;
+	/** Item the cursor was on when the menu last closed. */
+	private static MenuItem lastSelected = MenuItem.first();
+	/** Whether the exit confirmation is open. */
+	private boolean showingExitConfirm;
+	/** Whether the cursor in the confirmation is on Yes. */
+	private boolean exitConfirmYes;
+	/** Whether Escape was held during the previous update. */
+	private boolean escapeWasDown;
+	/** Stars behind the menu, kept between visits so they don't jump. */
+	private static Starfield starfield;
 	/**
 	 * Constructor, establishes the properties of the screen.
 	 * 
@@ -32,10 +43,13 @@ public class TitleScreen extends Screen {
 	public TitleScreen(final int width, final int height, final int fps) {
 		super(width, height, fps);
 
-		// Defaults to play.
-		this.returnCode = 2;
+		// Starts where the cursor was when the menu last closed.
+		this.selected = lastSelected;
 		this.selectionCooldown = Core.getCooldown(SELECTION_TIME);
 		this.selectionCooldown.reset();
+		this.escapeWasDown = this.inputManager.isKeyDown(KeyEvent.VK_ESCAPE);
+		if (starfield == null)
+			starfield = new Starfield(width, height);
 	}
 
 	/**
@@ -55,46 +69,159 @@ public class TitleScreen extends Screen {
 	protected final void update() {
 		super.update();
 
+		final boolean escapeDown =
+				this.inputManager.isKeyDown(KeyEvent.VK_ESCAPE);
+		final boolean escapePressed = escapeDown && !this.escapeWasDown;
+		this.escapeWasDown = escapeDown;
+
+		starfield.update();
 		draw();
-		if (this.selectionCooldown.checkFinished()
-				&& this.inputDelay.checkFinished()) {
-			if (inputManager.isKeyDown(KeyEvent.VK_UP)
-					|| inputManager.isKeyDown(KeyEvent.VK_W)) {
-				previousMenuItem();
-				this.selectionCooldown.reset();
+
+		if (!this.inputDelay.checkFinished()) {
+			return;
+		}
+
+		if (escapePressed) {
+			if (this.showingExitConfirm) {
+				closeExitConfirm();
+			} else {
+				openExitConfirm();
 			}
-			if (inputManager.isKeyDown(KeyEvent.VK_DOWN)
-					|| inputManager.isKeyDown(KeyEvent.VK_S)) {
-				nextMenuItem();
-				this.selectionCooldown.reset();
+			return;
+		}
+
+		if (this.selectionCooldown.checkFinished()) {
+			if (this.showingExitConfirm) {
+				updateExitConfirm();
+			} else {
+				updateMenu();
 			}
-			if (inputManager.isKeyDown(KeyEvent.VK_SPACE))
-				this.isRunning = false;
+		}
+
+		if (inputManager.isMouseMoved()) {
+			if (this.showingExitConfirm) {
+				final Boolean answer = drawManager.exitConfirmAnswerAt(this,
+						inputManager.getMouseX(), inputManager.getMouseY());
+				if (answer != null) {
+					this.exitConfirmYes = answer;
+				}
+			} else {
+				MenuItem item = drawManager.menuItemAt(this,
+						inputManager.getMouseY());
+				if (item != null) {
+					this.selected = item;
+				}
+			}
+		}
+
+	}
+
+	/**
+	 * Handles input while the menu has focus.
+	 */
+	private void updateMenu() {
+		if (inputManager.isKeyDown(KeyEvent.VK_UP)
+				|| inputManager.isKeyDown(KeyEvent.VK_W)) {
+			this.selected = this.selected.previous();
+			this.selectionCooldown.reset();
+		}
+		if (inputManager.isKeyDown(KeyEvent.VK_DOWN)
+				|| inputManager.isKeyDown(KeyEvent.VK_S)) {
+			this.selected = this.selected.next();
+			this.selectionCooldown.reset();
+		}
+		if (inputManager.isKeyDown(KeyEvent.VK_SPACE)
+				|| inputManager.isKeyDown(KeyEvent.VK_ENTER))
+			confirm();
+
+		if (inputManager.isMousePressed()) {
+			final MenuItem item = drawManager.menuItemAt(this,
+					inputManager.getMouseY());
+			if (item != null) {
+				this.selected = item;
+				confirm();
+			}
 		}
 	}
 
 	/**
-	 * Shifts the focus to the next menu item.
+	 * Handles input while the exit confirmation is open. The cursor starts on
+	 * No, so a second Space or Enter press cannot close the game by accident.
 	 */
-	private void nextMenuItem() {
-		if (this.returnCode == 3)
-			this.returnCode = 0;
-		else if (this.returnCode == 0)
-			this.returnCode = 2;
-		else
-			this.returnCode++;
+	private void updateExitConfirm() {
+		if (inputManager.isKeyDown(KeyEvent.VK_LEFT)
+				|| inputManager.isKeyDown(KeyEvent.VK_RIGHT)
+				|| inputManager.isKeyDown(KeyEvent.VK_A)
+				|| inputManager.isKeyDown(KeyEvent.VK_D)) {
+			this.exitConfirmYes = !this.exitConfirmYes;
+			this.selectionCooldown.reset();
+		}
+		if (inputManager.isKeyDown(KeyEvent.VK_SPACE)
+				|| inputManager.isKeyDown(KeyEvent.VK_ENTER))
+			answerExitConfirm();
+
+		if (inputManager.isMousePressed()) {
+			final Boolean answer = drawManager.exitConfirmAnswerAt(this,
+					inputManager.getMouseX(), inputManager.getMouseY());
+			if (answer != null) {
+				this.exitConfirmYes = answer;
+				answerExitConfirm();
+			}
+		}
 	}
 
 	/**
-	 * Shifts the focus to the previous menu item.
+	 * Acts on the answer the cursor is on. Every way of answering - Space,
+	 * Enter or a mouse click - goes through here.
 	 */
-	private void previousMenuItem() {
-		if (this.returnCode == 0)
-			this.returnCode = 3;
-		else if (this.returnCode == 2)
-			this.returnCode = 0;
-		else
-			this.returnCode--;
+	private void answerExitConfirm() {
+		if (this.exitConfirmYes) {
+			this.returnCode = MenuItem.EXIT.getCode();
+			this.isRunning = false;
+		} else
+			closeExitConfirm();
+	}
+
+	/**
+	 * Closes the confirmation and hands focus back to the menu.
+	 */
+	private void closeExitConfirm() {
+		this.showingExitConfirm = false;
+		this.exitConfirmYes = false;
+		this.selectionCooldown.reset();
+	}
+
+	/**
+	 * Keys the player can use right now.
+	 *
+	 * @return Line drawn at the bottom of the screen.
+	 */
+	private String keyHints() {
+		if (this.showingExitConfirm)
+			return "arrows to choose, space ok, esc cancel";
+
+		return "w+s/arrows move, space select, esc exit";
+	}
+
+	/**
+	 * Chooses the item the cursor is on and closes the screen, so Core opens
+	 * the screen behind it. Every way of choosing an item - Space, Enter or a
+	 * mouse click - goes through here. Disabled items are ignored, and Exit
+	 * opens the confirmation instead of closing the game, so every way of
+	 * choosing Exit is confirmed.
+	 */
+	private void confirm() {
+		if (!this.selected.isEnabled())
+			return;
+
+		if (this.selected == MenuItem.EXIT) {
+			openExitConfirm();
+			return;
+		}
+
+		lastSelected = this.selected;
+		this.returnCode = this.selected.getCode();
+		this.isRunning = false;
 	}
 
 	/**
@@ -103,9 +230,24 @@ public class TitleScreen extends Screen {
 	private void draw() {
 		drawManager.initDrawing(this);
 
+		drawManager.drawStarfield(this, starfield);
 		drawManager.drawTitle(this);
-		drawManager.drawMenu(this, this.returnCode);
+		drawManager.drawMenu(this, this.selected);
+		drawManager.drawKeyHints(this, keyHints());
+
+		// Drawn last so it sits over the menu.
+		if (this.showingExitConfirm)
+			drawManager.drawExitConfirm(this, this.exitConfirmYes);
 
 		drawManager.completeDrawing(this);
+	}
+
+	/**
+	 * Opens the exit confirmation with No selected.
+	 */
+	private void openExitConfirm() {
+		this.showingExitConfirm = true;
+		this.exitConfirmYes = false;
+		this.selectionCooldown.reset();
 	}
 }
